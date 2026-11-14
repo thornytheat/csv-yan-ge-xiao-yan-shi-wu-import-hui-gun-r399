@@ -689,3 +689,24 @@ input[type="file"] { width: 100%; padding: 9px 11px; border: 1px dashed var(--li
   border-radius: 8px; background: #fff; font: inherit; }
 
 .list.small li { margin: 3px 0; }
+
+/* ---------- 批次撤回（模块 5 增量） ---------- */
+.alert-warn { color: #7a4400; background: var(--warn-weak); border-color: #f0d9b5; border-left-color: var(--warn); }
+.alert-warn::before { content: "↩"; font-weight: 800; }
+
+button.danger, .btn.danger {
+  background: var(--err); color: #fff; border-color: var(--err);
+}
+button.danger:hover, .btn.danger:hover { filter: brightness(1.05); }
+
+dialog.retract-dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0; border: 1px solid var(--line); border-radius: 14px;
+  background: #fff; box-shadow: 0 24px 60px rgba(15, 25, 50, .25);
+}
+dialog.retract-dialog::backdrop { background: rgba(15, 25, 50, .35); }
+dialog.retract-dialog form { padding: 20px 22px; }
+dialog.retract-dialog h3 { margin: 0 0 6px; font-size: 17px; }
+dialog.retract-dialog .muted { font-size: 12.5px; }
+dialog.retract-dialog .field { margin: 12px 0; }
+dialog.retract-dialog .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }

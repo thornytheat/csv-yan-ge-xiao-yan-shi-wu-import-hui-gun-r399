@@ -222,3 +222,154 @@ def test_contract_module_keeps_order_independent():
     assert result["header"][1] == "amount"
     assert result["duplicate"] == []
     assert set(result["columns_used"]) == set(contract.REQUIRED)
+
+
+# ---------------------------------------------------------------- 批次撤回
+
+
+def _import_csv(client, text, name, **form):
+    return client.post("/api/import", files={"file": (name, text.encode("utf-8"), "text/csv")},
+                       data={"extra_policy": "reject", **form})
+
+
+def test_api_retract_switches_detail_and_site_summary(client, sample_dir):
+    uploaded = upload(client, sample_dir / "normal_500.csv", "normal_500.csv").json()
+    assert uploaded["status"] == "committed"
+    before = client.get("/health").json()["fact_rows"]
+    assert before == 560
+
+    res = client.post(f"/api/batches/{uploaded['batch_id']}/retract",
+                      json={"reason": "值班传错文件", "operator": "ops-7"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "completed"
+    assert body["rows_before"] == 560
+    assert body["rows_after"] == 60
+    assert body["removed_rows"] == 500
+    assert body["conflict_rows"] == 0
+    assert body["fact_rows"] == 60
+    assert body["summary"]["fact_rows"] == 60
+    assert body["summary"]["sites"] == [
+        {"site": s["site"], "row_count": s["row_count"], "amount_cents": s["amount_cents"],
+         "amount": s["amount"], "qty": s["qty"]}
+        for s in body["summary"]["sites"]
+    ]
+    assert sum(s["row_count"] for s in body["summary"]["sites"]) == 60
+    assert body["delete_evidence"]
+    assert body["retraction"]["reason"] == "值班传错文件"
+    assert client.get("/health").json()["fact_rows"] == 60
+
+    # 汇总接口同步反映撤回
+    listing = client.get("/api/batches").json()
+    assert listing["stats"]["batches"] == 1
+    assert listing["stats"]["retracted_batches"] == 1
+    row = [b for b in listing["batches"] if b["batch_id"] == uploaded["batch_id"]][0]
+    assert row["status"] == "retracted"
+    assert row["retraction_id"] == body["retraction_id"]
+
+    evidence = client.get(f"/api/batches/{uploaded['batch_id']}/retraction").json()
+    assert evidence["retraction"]["status"] == "completed"
+    assert evidence["delete_evidence"] == body["delete_evidence"]
+    assert evidence["conflicts"] == []
+
+
+def test_api_retract_is_idempotent_on_retry(client, sample_dir):
+    uploaded = upload(client, sample_dir / "normal_500.csv", "normal_500.csv").json()
+    first = client.post(f"/api/batches/{uploaded['batch_id']}/retract", json={}).json()
+    assert first["status"] == "completed"
+    rows = client.get("/health").json()["fact_rows"]
+
+    replay = client.post(f"/api/batches/{uploaded['batch_id']}/retract", json={})
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "completed"
+    assert replay.json()["idempotent_replay"] is True
+    assert client.get("/health").json()["fact_rows"] == rows        # 没有二次扣减
+
+
+def test_api_retract_unknown_batch_and_retracted_resubmit(client, sample_dir):
+    res = client.post("/api/batches/B-NOPE/retract", json={})
+    assert res.status_code == 404
+    assert res.json()["status"] == "not_found"
+
+    uploaded = upload(client, sample_dir / "gbk_120.csv", "gbk_120.csv").json()
+    client.post(f"/api/batches/{uploaded['batch_id']}/retract", json={})
+
+    # 撤回后相同 sha256 可以重新入库（不再命中 duplicate_file）
+    replay = upload(client, sample_dir / "gbk_120.csv", "gbk_120.csv")
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "committed"
+    assert replay.json()["batch_id"] != uploaded["batch_id"]
+
+    check = client.post("/api/replay-check", json={"sha256": uploaded["sha256"]})
+    assert check.json()["verdict"] == "duplicate_file"              # 新批次已 active
+
+
+def test_api_retract_keeps_later_version_and_lists_conflicts(client):
+    early = _import_csv(
+        client,
+        "site,category,order_id,order_date,amount,qty\n"
+        "beijing,grocery,1,2026-11-05,10.00,2\n"
+        "shanghai,grocery,2,2026-11-05,20.00,1\n",
+        "early.csv",
+    ).json()
+    later = _import_csv(
+        client,
+        "site,category,order_id,order_date,amount,qty\n"
+        "beijing,grocery,1,2026-11-05,10.00,3\n"
+        "shenzhen,grocery,3,2026-11-05,30.00,2\n",
+        "later.csv",
+    ).json()
+    assert early["status"] == later["status"] == "committed"
+
+    res = client.post(f"/api/batches/{early['batch_id']}/retract",
+                      json={"reason": "手工撤回 early"})
+    body = res.json()
+    assert body["status"] == "completed"
+    assert body["conflict_rows"] == 1
+    assert body["rows_after"] == body["rows_before"] - 2           # seed 60 行 + later 批 2 行
+    assert body["unique_orders_removed"] == 1
+    conflicts = body["conflicts"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["order_id"] == 1
+    assert conflicts[0]["later_batch_id"] == later["batch_id"]
+    assert conflicts[0]["action"] == "kept_later_version"
+    assert conflicts[0]["other_versions"][0]["changed_fields"] == ["qty"]
+
+    page = client.get(f"/retraction/{early['batch_id']}")
+    assert page.status_code == 200
+    assert "冲突清单" in page.text
+    assert "保留后来版本" in page.text
+    assert later["batch_id"] in page.text
+    assert "值班传错" in page.text or "手工撤回 early" in page.text
+    assert "汇总自证" in page.text
+
+
+def test_retraction_pages_render(client, sample_dir):
+    uploaded = upload(client, sample_dir / "normal_500.csv", "normal_500.csv").json()
+    client.post(f"/api/batches/{uploaded['batch_id']}/retract",
+                json={"reason": "页面验证", "operator": "tester"})
+
+    result_page = client.get(f"/result/{uploaded['batch_id']}")
+    assert result_page.status_code == 200
+    assert "已撤回" in result_page.text
+    assert "看撤回依据" in result_page.text
+
+    review = client.get("/review")
+    assert review.status_code == 200
+    assert "撤回记录" in review.text
+    assert "当前站点汇总" in review.text
+    assert uploaded["batch_id"] in review.text
+
+    evidence = client.get(f"/api/batches/{uploaded['batch_id']}/retraction")
+    assert evidence.status_code == 200
+    detail = evidence.json()
+    assert detail["items_total"] == 500
+    assert detail["batch"]["status"] == "retracted"
+
+
+def test_result_page_offers_retract_for_active_batch(client, sample_dir):
+    uploaded = upload(client, sample_dir / "gbk_120.csv", "gbk_120.csv").json()
+    page = client.get(f"/result/{uploaded['batch_id']}")
+    assert page.status_code == 200
+    assert "data-retract-batch" in page.text
+    assert "撤回本批次" in page.text

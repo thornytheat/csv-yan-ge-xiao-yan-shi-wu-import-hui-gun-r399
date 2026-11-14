@@ -22,7 +22,7 @@
   <div class="kpi">
     <div class="k-label">累计批次</div>
     <div class="k-value">{{ stats.batches }}</div>
-    <div class="k-note">batches 表（含 seed 历史批次）</div>
+    <div class="k-note">计入明细的批次 · 已撤回 {{ stats.retracted_batches }}</div>
   </div>
   <div class="kpi ok">
     <div class="k-label">累计行数</div>
@@ -57,7 +57,9 @@
         <tr>
           <td class="nowrap"><a href="/result/{{ b.batch_id }}">{{ b.batch_id }}</a>
             {% if b.forced %}<span class="tag warn">forced</span>{% endif %}
-            {% if b.superseded_by %}<span class="tag">已替代</span>{% endif %}</td>
+            {% if b.superseded_by %}<span class="tag">已替代</span>{% endif %}
+            {% if b.status == 'retracted' %}<span class="tag err">已撤回</span>
+            {% elif b.status == 'retracting' %}<span class="tag warn">撤回中</span>{% endif %}</td>
           <td class="cell-ellipsis">{{ b.filename }}</td>
           <td><span class="tag">{{ b.encoding }}</span>{% if b.bom %} BOM{% endif %}</td>
           <td class="num">{{ b.row_count }}</td>
@@ -92,6 +94,8 @@
                 {% if a.status == 'committed' %}<span class="tag ok">已入库</span>
                 {% elif a.status == 'duplicate_file' %}<span class="tag warn">重复文件</span>
                 {% elif a.status == 'rolled_back' %}<span class="tag err">已回滚</span>
+                {% elif a.status == 'retracting' %}<span class="tag warn">撤回中</span>
+                {% elif a.status == 'retracted' %}<span class="tag err">已撤回</span>
                 {% else %}<span class="tag err">{{ a.status }}</span>{% endif %}
               </td>
               <td class="num">{{ a.error_count }}</td>

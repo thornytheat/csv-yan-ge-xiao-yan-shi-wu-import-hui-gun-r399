@@ -1,7 +1,6 @@
 """FastAPI 入口：路由保持薄，业务判定都在 pipeline / 纯函数模块里。"""
 from __future__ import annotations
 
-import io
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import contract, pipeline, report, seed, settings, store
+from . import contract, pipeline, report, retraction, seed, settings, store
 
 MAX_BYTES = 8 * 1024 * 1024
 
@@ -21,6 +20,13 @@ STATUS_HTTP = {
     "rejected": 422,
     "encoding_failed": 400,
     "rolled_back": 500,
+    "completed": 200,
+    "pending": 409,
+    "not_retractable": 409,
+    "not_found": 404,
+    "idempotency_conflict": 409,
+    "empty": 409,
+    "error": 500,
 }
 
 
@@ -50,6 +56,8 @@ def base_context(request: Request, active: str) -> dict:
     conn = get_conn()
     try:
         stats = store.stats(conn)
+        site_totals = store.summary_snapshot(conn)
+        summary_check = store.verify_summary(conn)
     finally:
         conn.close()
     return {
@@ -58,6 +66,8 @@ def base_context(request: Request, active: str) -> dict:
         "app_short": settings.APP_SHORT,
         "active": active,
         "stats": stats,
+        "site_totals": site_totals,
+        "summary_check": summary_check,
         "samples": settings.SAMPLE_FILES,
     }
 
@@ -135,6 +145,7 @@ def _render_result(request: Request, result: dict, notice: str = "", status_code
         batch = store.get_batch(conn, result["batch_id"]) if result.get("batch_id") else None
         rows_before = result.get("rows_before")
         rows_after = result.get("rows_after")
+        current_summary = store.summary_snapshot(conn)
         for attempt in attempts:
             attempt.pop("errors_json", None)
     finally:
@@ -145,6 +156,7 @@ def _render_result(request: Request, result: dict, notice: str = "", status_code
         "result": result,
         "batch": batch,
         "attempts": attempts,
+        "current_summary": current_summary,
         "notice": notice,
         "rows_before": rows_before,
         "rows_after": rows_after,
@@ -217,6 +229,7 @@ def result_page(request: Request, batch_id: str,
         for attempt in attempts:
             attempt.pop("errors_json", None)
         total_batches = store.stats(conn)
+        current_summary = store.summary_snapshot(conn)
     finally:
         conn.close()
     if not batch:
@@ -240,6 +253,7 @@ def result_page(request: Request, batch_id: str,
         "batch": batch,
         "attempts": attempts,
         "stats": total_batches,
+        "current_summary": current_summary,
         "notice": notice,
         "rows_before": None,
         "rows_after": None,
@@ -281,6 +295,9 @@ def review(request: Request):
         batches = store.list_batches(conn, limit=30)
         attempts = store.list_attempts(conn, limit=30)
         stats = store.stats(conn)
+        retractions = store.list_retractions(conn, limit=20)
+        site_totals = store.summary_snapshot(conn)
+        summary_check = store.verify_summary(conn)
     finally:
         conn.close()
     for attempt in attempts:
@@ -291,6 +308,9 @@ def review(request: Request):
         "batches": batches,
         "attempts": attempts,
         "stats": stats,
+        "retractions": retractions,
+        "site_totals": site_totals,
+        "summary_check": summary_check,
     })
 
 
@@ -344,6 +364,7 @@ async def api_replay_check(request: Request):
     conn = get_conn()
     try:
         existing = store.find_batch_by_sha(conn, sha)
+        retracted = store.find_retracted_batch_by_sha(conn, sha) if not existing else None
         count = store.count_rows(conn)
     finally:
         conn.close()
@@ -355,6 +376,16 @@ async def api_replay_check(request: Request):
             "message": (f"同文件已入库为 {existing['batch_id']}（{existing['filename']}，"
                         f"{existing['row_count']} 行）。再次上传不会重复写入；"
                         "需要重灌请显式勾选 force_new_batch。"),
+            "fact_rows": count,
+        }
+    if retracted:
+        return {
+            "sha256": sha,
+            "verdict": "new_file",
+            "batch_id": None,
+            "retracted_batch_id": retracted["batch_id"],
+            "message": (f"该 sha256 对应的批次 {retracted['batch_id']} 已撤回、不再计入明细，"
+                        "再次上传会作为新批次正常入库。"),
             "fact_rows": count,
         }
     return {
@@ -373,6 +404,101 @@ def api_batches():
         return {"batches": store.list_batches(conn, limit=50), "stats": store.stats(conn)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- 撤回
+
+
+@app.post("/api/batches/{batch_id}/retract")
+async def api_retract(batch_id: str, request: Request):
+    """撤回一个已入账批次（JSON body 可选：reason / operator / idempotency_key）。
+
+    同一批次重复调用是幂等的：已完成的撤回只返回既有记录，不重复扣减。
+    """
+    body: dict = {}
+    if (await request.body()).strip():
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - 允许空/坏 body，按默认参数处理
+            body = {}
+    if not isinstance(body, dict):
+        body = {}
+    conn = get_conn()
+    try:
+        result = retraction.retract_batch(
+            conn, batch_id,
+            reason=str(body.get("reason") or ""),
+            operator=str(body.get("operator") or ""),
+            idempotency_key=(str(body["idempotency_key"]).strip()
+                             if body.get("idempotency_key") else None),
+        )
+        result["fact_rows"] = store.count_rows(conn)
+        result["summary"] = store.summary_snapshot(conn)
+        result["conflicts"] = (
+            retraction.conflict_view(conn, result["retraction_id"])
+            if result.get("retraction_id") else []
+        )
+        result["delete_evidence"] = (retraction.delete_hash(batch_id)
+                                     if result.get("retraction_id") else None)
+    finally:
+        conn.close()
+    return JSONResponse(result, status_code=STATUS_HTTP.get(result["status"], 400))
+
+
+@app.get("/api/batches/{batch_id}/retraction")
+def api_retraction(batch_id: str):
+    """撤回依据 + 冲突清单（长期保留，供事后复核）。"""
+    conn = get_conn()
+    try:
+        batch = store.get_batch(conn, batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
+        retraction_record = store.get_retraction_for_batch(conn, batch_id)
+        if not retraction_record:
+            raise HTTPException(status_code=404, detail=f"批次 {batch_id} 没有撤回记录")
+        items = store.list_retraction_items(conn, retraction_record["retraction_id"],
+                                            limit=10_000_000)
+        return {
+            "retraction": retraction_record,
+            "batch": batch,
+            "delete_evidence": retraction.delete_hash(batch_id),
+            "conflicts": retraction.conflict_view(conn, retraction_record["retraction_id"]),
+            "items_total": len(items),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/retraction/{batch_id}", response_class=HTMLResponse)
+def retraction_page(request: Request, batch_id: str):
+    conn = get_conn()
+    try:
+        batch = store.get_batch(conn, batch_id)
+        record = store.get_retraction_for_batch(conn, batch_id) if batch else None
+        items = (store.list_retraction_items(conn, record["retraction_id"], limit=500)
+                 if record else [])
+        current = store.summary_snapshot(conn)
+        check = store.verify_summary(conn)
+        retractions = store.list_retractions(conn, limit=20)
+        incidents = retraction.conflict_view(conn, record["retraction_id"]) if record else []
+    finally:
+        conn.close()
+    if not batch:
+        raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
+    conflicts = incidents
+    return _render(request, "retraction.html", {
+        "active": "review",
+        "page": "review",
+        "batch": batch,
+        "retraction": record,
+        "items": items,
+        "conflicts": conflicts,
+        "removed_count": sum(1 for i in items if i["action"] == "removed"),
+        "current_summary": current,
+        "summary_check": check,
+        "retractions": retractions,
+        "delete_evidence": retraction.delete_hash(batch_id),
+    })
 
 
 @app.get("/api/samples/{name}")

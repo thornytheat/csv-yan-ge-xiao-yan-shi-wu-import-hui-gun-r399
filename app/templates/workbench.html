@@ -206,8 +206,13 @@
             <tr><td>同 sha256 已入库</td><td><span class="tag warn">duplicate_file</span></td><td class="small">不写库，返回既有批次</td></tr>
             <tr><td>勾选 force_new_batch</td><td><span class="tag warn">forced</span></td><td class="small">新建批次，旧批次标记 superseded_by</td></tr>
             <tr><td>编码无法解码</td><td><span class="tag err">encoding_failed</span></td><td class="small">不进入行校验，给前 16 字节建议</td></tr>
+            <tr><td>已入账批次撤回</td><td><span class="tag err">retracted</span></td><td class="small">独有订单移出明细；被后续批次修订过的订单保留后来版本并在冲突清单逐项标出；明细与汇总一次性切换，原批次与撤回依据长期保留</td></tr>
+            <tr><td>撤回中断后重试</td><td><span class="tag warn">pending → completed</span></td><td class="small">进度随块持久化，从剩余行继续，不重复扣减</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">撤回入口：结果页右上角「撤回本批次」，或「历史与复核」批次行的「撤回」；撤回后可在 <code>/retraction/&lt;批号&gt;</code> 复核依据与冲突清单。</p>
       </div>
     </section>
 

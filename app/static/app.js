@@ -202,3 +202,77 @@
     });
   }
 })();
+
+// ---- 批次撤回：确认弹窗 + 幂等提交（同一批次重复提交不会重复扣减）
+(function () {
+  var dialog = document.getElementById('retract-dialog');
+  var confirmBtn = document.getElementById('retract-confirm');
+  var cancelBtn = document.getElementById('retract-cancel');
+  var errHost = document.getElementById('retract-dialog-error');
+  var targetText = document.getElementById('retract-target');
+  var busy = false;
+  if (!dialog || !confirmBtn) return;
+
+  function openFor(btn) {
+    dialog.dataset.batch = btn.getAttribute('data-retract-batch');
+    if (targetText) targetText.textContent = btn.getAttribute('data-retract-label') || dialog.dataset.batch;
+    if (errHost) { errHost.hidden = true; errHost.textContent = ''; }
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', 'open');
+  }
+
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target.closest('[data-retract-batch]');
+    if (btn) { ev.preventDefault(); openFor(btn); }
+  });
+
+  if (cancelBtn) cancelBtn.addEventListener('click', function () {
+    if (typeof dialog.close === 'function') dialog.close(); else dialog.removeAttribute('open');
+  });
+
+  confirmBtn.addEventListener('click', async function () {
+    if (busy) return;
+    busy = true;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '撤回中…';
+    if (errHost) errHost.hidden = true;
+    var reason = document.getElementById('retract-reason');
+    var operator = document.getElementById('retract-operator');
+    try {
+      var res = await fetch(
+        '/api/batches/' + encodeURIComponent(dialog.dataset.batch) + '/retract',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reason: reason ? reason.value : '',
+            operator: operator ? operator.value : ''
+          })
+        }
+      );
+      var data = {};
+      try { data = await res.json(); } catch (e) { data = {}; }
+      if (data.status === 'completed') {
+        // 撤回完成（含幂等重试）→ 撤回详情页：原批次与依据长期保留
+        window.location.href = '/retraction/' + encodeURIComponent(dialog.dataset.batch);
+        return;
+      }
+      if (errHost) {
+        errHost.hidden = false;
+        errHost.textContent = '撤回未完成：' + (data.detail || ('HTTP ' + res.status))
+          + (typeof data.removed_rows === 'number'
+             ? '（已保存进度 ' + data.removed_rows + '/' + (data.planned_rows || '?') + ' 行，可再次发起从断点继续）'
+             : '');
+      }
+    } catch (err) {
+      if (errHost) {
+        errHost.hidden = false;
+        errHost.textContent = '撤回失败：' + (err && err.message ? err.message : String(err));
+      }
+    } finally {
+      busy = false;
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '确认撤回';
+    }
+  });
+})();

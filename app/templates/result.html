@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ batch.batch_id if batch else '入库结果' }} · {{ app_name }}{% endblock %}
 {% block crumb %}入库结果{% endblock %}
-{% block meta %}{% if batch %}<span class="dot ok"></span>已入库 · {{ batch.row_count }} 行 · {{ batch.encoding }}{% else %}<span class="dot warn"></span>没有可展示的批次{% endif %}{% endblock %}
+{% block meta %}{% if batch %}{% if batch.status == 'retracted' %}<span class="dot warn"></span>已撤回 · 不计入明细{% else %}<span class="dot ok"></span>已入库 · {{ batch.row_count }} 行 · {{ batch.encoding }}{% endif %}{% else %}<span class="dot warn"></span>没有可展示的批次{% endif %}{% endblock %}
 {% block actions %}
 <a class="btn secondary small" href="/workbench">再传一份</a>
 <a class="btn secondary small" href="/review">历史与复核</a>
@@ -16,14 +16,37 @@
       文件 <b>{{ batch.filename }}</b> · 编码 <span class="tag ok">{{ batch.encoding }}</span>
       {% if batch.bom %}含 UTF-8 BOM（已剥离）{% else %}无 BOM{% endif %} ·
       入库时间 {{ batch.created_at }} ·
+      {% if batch.status == 'retracted' %}
+      <span class="tag err">已撤回</span> 于 {{ batch.retracted_at }}，该批明细已从当前明细与站点汇总中移除
+      {% elif batch.status == 'retracting' %}
+      <span class="tag warn">撤回中</span> 进度已保存，可继续撤回
+      {% else %}
       <span class="tag ok">已入库</span> 单事务提交，无回滚
+      {% endif %}
       {% if batch.superseded_by %} · <span class="tag warn">已被 {{ batch.superseded_by }} 替代</span>{% endif %}
     </p>
   </div>
   <div class="page-head-actions">
+    {% if batch.status == 'retracted' %}
+    <a class="btn secondary small" href="/retraction/{{ batch.batch_id }}">看撤回依据</a>
+    {% elif batch.status in ('active', 'retracting') %}
+    <button type="button" class="btn danger small" data-retract-batch="{{ batch.batch_id }}"
+            data-retract-label="{{ batch.batch_id }} / {{ batch.filename }} / {{ batch.row_count }} 行">撤回本批次</button>
+    {% endif %}
     <a class="btn small" href="/workbench">回工作台</a>
   </div>
 </div>
+
+{% if batch.status == 'retracted' %}
+<div class="alert alert-warn" role="status">
+  本批次已撤回：<b>{{ batch.retraction.planned_rows if batch.retraction else batch.row_count }} 行</b>
+  已从当前明细撤下，站点汇总同步扣减；原批次与逐行撤回依据长期保留（批号不删除）。
+  {% if batch.retraction and batch.retraction.items_conflict %}
+  其中 <b>{{ batch.retraction.items_conflict }}</b> 个订单被更晚批次修订过，已保留后来版本，见下方冲突清单。
+  {% endif %}
+  <a href="/retraction/{{ batch.batch_id }}">查看完整撤回依据与冲突清单</a>
+</div>
+{% endif %}
 
 <div class="kpi-strip">
   <div class="kpi ok">
@@ -37,12 +60,14 @@
     <div class="k-note">文件数据行（不含表头）</div>
   </div>
   <div class="kpi">
-    <div class="k-label">本次写入</div>
-    <div class="k-value">{{ batch.row_count }}</div>
+    <div class="k-label">{% if batch.status == 'retracted' %}已撤下行数{% else %}本次写入{% endif %}</div>
+    <div class="k-value">{% if batch.status == 'retracted' %}{{ batch.retraction.planned_rows if batch.retraction else batch.row_count }}{% else %}{{ batch.row_count }}{% endif %}</div>
     <div class="k-note">
-      {% if rows_before is not none and rows_after is not none %}
+      {% if batch.status == 'retracted' %}
+      明细 {{ batch.retraction.rows_before if batch.retraction else '-' }} → {{ batch.retraction.rows_after if batch.retraction else '-' }} 行
+      {% elif rows_before is not none and rows_after is not none %}
       写入前 {{ rows_before }} → 写入后 {{ rows_after }} 行（+{{ rows_after - rows_before }}）
-      {% else %}库内当前 {{ stats.fact_rows }} 行{% endif %}
+      {% else %}库内当前 {{ current_summary.fact_rows if current_summary else stats.fact_rows }} 行{% endif %}
     </div>
   </div>
   <div class="kpi ok">
@@ -67,8 +92,8 @@
 
   <div id="tab-agg" class="tab-panel">
     <div class="panel-body tight">
-      <h3 style="margin:0">按站点聚合（group by site）</h3>
-      <p class="small muted" style="margin:4px 0 0">聚合来自同一批明细，并与明细累计做过独立口径校验（分组累加 cents / 线性累加 / Decimal 复核）。</p>
+      <h3 style="margin:0">按站点聚合（group by site）{% if batch.status == 'retracted' %}<span class="tag warn">原批快照 · 不计入当前汇总</span>{% endif %}</h3>
+      <p class="small muted" style="margin:4px 0 0">聚合来自同一批明细，并与明细累计做过独立口径校验（分组累加 cents / 线性累加 / Decimal 复核）。{% if batch.status == 'retracted' %}撤回只保留快照，不删除本条记录。{% endif %}</p>
     </div>
     <div class="table-wrap roomy">
       <table class="dense">
@@ -118,10 +143,18 @@
           <tr><th>被新批次替代</th><td><a href="/result/{{ batch.superseded_by }}">{{ batch.superseded_by }}</a>
             <span class="muted small">（同 sha256 的 force_new_batch 重灌）</span></td></tr>
           {% endif %}
+          <tr><th>批次状态</th><td>
+            {% if batch.status == 'retracted' %}<span class="tag err">已撤回</span> {{ batch.retracted_at }}
+            · 撤回记录 <a href="/retraction/{{ batch.batch_id }}">{{ batch.retraction_id }}</a>
+            {% elif batch.status == 'retracting' %}<span class="tag warn">撤回中（进度已保存）</span>
+            {% else %}<span class="tag ok">active · 计入当前明细</span>{% endif %}
+          </td></tr>
           <tr><th>明细行数校验</th><td>
-            {% if rows_before is not none and rows_after is not none %}
+            {% if batch.status == 'retracted' and batch.retraction %}
+            撤下 {{ batch.retraction.planned_rows }} 行 · 明细 {{ batch.retraction.rows_before }} → {{ batch.retraction.rows_after }} 行
+            {% elif rows_before is not none and rows_after is not none %}
             写入前 {{ rows_before }} 行 → 写入后 {{ rows_after }} 行（本次 +{{ rows_after - rows_before }}）
-            {% else %}库内当前 {{ stats.fact_rows }} 行{% endif %}
+            {% else %}库内当前 {{ current_summary.fact_rows if current_summary else stats.fact_rows }} 行{% endif %}
           </td></tr>
         </tbody>
       </table>
@@ -136,6 +169,8 @@
             <td class="cell-ellipsis">{{ a.filename }}</td>
             <td>{% if a.status == 'committed' %}<span class="tag ok">已入库</span>
                 {% elif a.status == 'duplicate_file' %}<span class="tag warn">重复文件</span>
+                {% elif a.status == 'retracting' %}<span class="tag warn">撤回中</span>
+                {% elif a.status == 'retracted' %}<span class="tag err">已撤回</span>
                 {% else %}<span class="tag err">{{ a.status }}</span>{% endif %}</td>
             <td class="small muted nowrap">{{ a.created_at }}</td>
             <td class="small">{{ a.detail }}</td>
@@ -147,14 +182,14 @@
       </table>
     </div>
     <div class="panel-body tight">
-      <p class="small muted" style="margin:0">该批次的上传记录：committed = 本次写入；duplicate_file = 同 sha256 幂等命中，未重复写库。</p>
+      <p class="small muted" style="margin:0">该批次的上传记录：committed = 本次写入；duplicate_file = 同 sha256 幂等命中，未重复写库；retracting / retracted = 批次撤回的进度与完成依据。</p>
     </div>
   </div>
 
   <div id="tab-detail" class="tab-panel" hidden>
     <div class="table-wrap roomy">
       <table class="dense">
-        <thead><tr><th class="num">行号</th><th>order_id</th><th>site</th><th>category</th><th>order_date</th><th class="num">amount</th><th class="num">qty</th></tr></thead>
+        <thead><tr><th class="num">行号</th><th>order_id</th><th>site</th><th>category</th><th>order_date</th><th class="num">amount</th><th class="num">qty</th>{% if batch.status == 'retracted' %}<th>撤回处置</th><th>后来版本</th>{% endif %}</tr></thead>
         <tbody>
           {% for r in batch.sample_rows %}
           <tr>
@@ -165,16 +200,24 @@
             <td>{{ r.order_date }}</td>
             <td class="num">{{ r.amount }}</td>
             <td class="num">{{ r.qty }}</td>
+            {% if batch.status == 'retracted' %}
+            <td>{% if r.action == 'kept_later_version' %}<span class="tag warn">保留后来版本</span>{% else %}<span class="tag err">已撤下</span>{% endif %}</td>
+            <td class="small">
+              {% if r.later_batch_id %}<a href="/result/{{ r.later_batch_id }}">{{ r.later_batch_id }}</a> · 行 {{ r.later_row_no }}
+              {% else %}—{% endif %}
+            </td>
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
     <div class="panel-body tight">
-      <p class="small muted" style="margin:0"><b>明细前 20 行（用于抽验）</b> · 完整明细在 fact_orders 表（volume csvgate-data），只展示前 20 行。</p>
+      <p class="small muted" style="margin:0"><b>明细前 20 行（用于抽验）</b> · 完整明细在 fact_orders 表（volume csvgate-data），只展示前 20 行。{% if batch.status == 'retracted' %}已撤回批次展示的是逐行撤回快照（batch_retraction_items）。{% endif %}</p>
     </div>
   </div>
 </div>
+{% include "_retract_dialog.html" %}
 
 {% else %}
 <div class="page-head">

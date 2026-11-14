@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+{% block title %}撤回依据 · {{ batch.batch_id }} · {{ app_name }}{% endblock %}
+{% block crumb %}撤回依据{% endblock %}
+{% block meta %}{% if retraction and retraction.status == 'completed' %}<span class="dot warn"></span>已撤回 · {{ retraction.planned_rows }} 行已撤下 · 冲突 {{ conflicts|length }} 项{% else %}<span class="dot err"></span>撤回未完成 · 进度已保存{% endif %}{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/result/{{ batch.batch_id }}">看原批次</a>
+<a class="btn secondary small" href="/review">历史与复核</a>
+{% endblock %}
+{% block status_left %}撤回依据长期保留：原批次行不删除，只改为 retracted；逐行快照存于 batch_retraction_items{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">批次撤回 · {{ batch.batch_id }}</h1>
+    <p class="page-sub">
+      文件 <b>{{ batch.filename }}</b> · 原入库 {{ batch.created_at }} ·
+      {% if retraction and retraction.status == 'completed' %}
+      <span class="tag err">已撤回</span> {{ retraction.completed_at }}
+      {% elif retraction %}
+      <span class="tag warn">撤回中（{{ retraction.removed_rows }}/{{ retraction.planned_rows }} 行）</span>
+      {% else %}
+      <span class="tag">没有撤回记录</span>
+      {% endif %}
+      · 撤回依据摘要 <code class="mono">{{ delete_evidence }}</code>
+    </p>
+  </div>
+  <div class="page-head-actions">
+    {% if batch.status in ('active', 'retracting') %}
+    <button type="button" class="btn danger small" data-retract-batch="{{ batch.batch_id }}"
+            data-retract-label="{{ batch.batch_id }} / {{ batch.filename }} / {{ batch.row_count }} 行">
+      {% if retraction and retraction.status == 'pending' %}继续撤回（断点恢复）{% else %}撤回本批次{% endif %}
+    </button>
+    {% endif %}
+    <a class="btn small" href="/review">回历史与复核</a>
+  </div>
+</div>
+
+{% if not retraction %}
+<div class="panel"><div class="empty">
+  <strong>该批次还没有撤回记录</strong>
+  点击右上角「撤回本批次」会先生成撤回依据（逐行冲突分析），再一次性切换明细与汇总。
+</div></div>
+{% else %}
+
+{% if retraction.status == 'completed' %}
+<div class="alert alert-info" role="status">
+  撤回已完成：明细 <b>{{ retraction.rows_before }}</b> → <b>{{ retraction.rows_after }}</b> 行，
+  撤下 <b>{{ retraction.planned_rows }}</b> 行（其中 <b>{{ conflicts|length }}</b> 个订单保留后来版本）。
+  原批次、逐行快照与撤回依据长期保留，可随时复核。
+</div>
+{% else %}
+<div class="alert alert-warn" role="status">
+  撤回尚未完成：已保存进度 <b>{{ retraction.removed_rows }}/{{ retraction.planned_rows }}</b> 行。
+  {% if retraction.error %}{{ retraction.error }}{% endif %}
+  再次发起同一撤回会从剩余行继续，已扣减的行不会重复扣减。
+</div>
+{% endif %}
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">撤回状态</div>
+    <div class="k-value" style="font-size:18px">{% if retraction.status == 'completed' %}已完成{% else %}进行中{% endif %}</div>
+    <div class="k-note">{{ retraction.retraction_id }}</div>
+  </div>
+  <div class="kpi {% if retraction.status == 'completed' %}ok{% endif %}">
+    <div class="k-label">已撤下明细行</div>
+    <div class="k-value">{{ retraction.planned_rows }}</div>
+    <div class="k-note">原批次 {{ batch.row_count }} 行 · 快照保留</div>
+  </div>
+  <div class="kpi {% if conflicts %}warn{% endif %}">
+    <div class="k-label">冲突清单（保留后来版本）</div>
+    <div class="k-value">{{ conflicts|length }}</div>
+    <div class="k-note">被更晚批次修订过的订单，逐项列出</div>
+  </div>
+  <div class="kpi {% if summary_check.ok %}ok{% else %}err{% endif %}">
+    <div class="k-label">汇总自证</div>
+    <div class="k-value" style="font-size:17px">{% if summary_check.ok %}一致{% else %}不一致{% endif %}</div>
+    <div class="k-note">站点汇总 vs 明细逐项复算</div>
+  </div>
+</div>
+
+<div class="split result">
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>撤回依据（长期保留）</h2>
+        <div class="panel-actions"><span class="tag mono">{{ delete_evidence }}</span></div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <tbody>
+            <tr><th style="width:150px">撤回记录号</th><td><code>{{ retraction.retraction_id }}</code></td></tr>
+            <tr><th>批次</th><td><a href="/result/{{ batch.batch_id }}">{{ batch.batch_id }}</a>
+              {% if batch.superseded_by %}<span class="tag warn">已被 {{ batch.superseded_by }} 替代</span>{% endif %}</td></tr>
+            <tr><th>文件 / sha256</th><td>{{ batch.filename }} · <code class="mono small">{{ batch.sha256 }}</code></td></tr>
+            <tr><th>撤回原因</th><td>{{ retraction.reason or '—' }}</td></tr>
+            <tr><th>操作人</th><td>{{ retraction.operator or '—' }}</td></tr>
+            <tr><th>幂等键</th><td><code class="mono small">{{ retraction.idempotency_key }}</code></td></tr>
+            <tr><th>状态</th><td>
+              {% if retraction.status == 'completed' %}<span class="tag err">completed</span>
+              {% else %}<span class="tag warn">pending · 已保存进度 {{ retraction.removed_rows }}/{{ retraction.planned_rows }}</span>{% endif %}
+            </td></tr>
+            <tr><th>发起 / 完成时间</th><td>{{ retraction.created_at }} → {{ retraction.completed_at or '—' }}</td></tr>
+            <tr><th>明细行数切换</th><td>
+              {% if retraction.status == 'completed' %}{{ retraction.rows_before }} → {{ retraction.rows_after }} 行（撤下 {{ retraction.planned_rows }} 行）{% else %}进度 {{ retraction.removed_rows }}/{{ retraction.planned_rows }} 行{% endif %}</td></tr>
+            {% if retraction.error %}<tr><th>最近一次中断</th><td class="small">{{ retraction.error }}</td></tr>{% endif %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>冲突清单 · 逐项标出</h2>
+        <div class="panel-actions"><span class="tag {% if conflicts %}warn{% endif %}">{{ conflicts|length }} 项</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead>
+            <tr>
+              <th class="num">原行号</th><th>order_id</th><th>原批次取值</th>
+              <th>后来版本</th><th>修订差异</th><th>其它版本</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for item in conflicts %}
+            <tr>
+              <td class="num">{{ item.row_no }}</td>
+              <td>{{ item.order_id }}</td>
+              <td class="small">
+                {{ item.site }} / {{ item.category }} / {{ item.order_date }} /
+                ¥{{ item.removed_amount }} / {{ item.qty }} 件
+                <span class="tag err">本批这行已撤下</span>
+              </td>
+              <td class="small">
+                {% if item.later %}
+                <a href="/result/{{ item.later.batch_id }}">{{ item.later.batch_id }}</a> · 行 {{ item.later.row_no }}
+                <div class="muted">
+                  {{ item.later.site }} / {{ item.later.category }} / {{ item.later.order_date }} /
+                  ¥{{ item.later.amount }} / {{ item.later.qty }} 件
+                </div>
+                <span class="tag ok">保留</span>
+                {% else %}
+                <a href="/result/{{ item.later_batch_id }}">{{ item.later_batch_id }}</a> · 行 {{ item.later_row_no }}
+                <div class="muted">后来版本已随其批次撤回</div>
+                {% endif %}
+              </td>
+              <td class="small">
+                {% if item.later and item.later.changed_fields %}
+                  {% for f in item.later.changed_fields %}<span class="tag warn">{{ f }}</span>{% endfor %}
+                {% elif item.later %}字段值与原来一致（同订单重灌）{% else %}—{% endif %}
+              </td>
+              <td class="small">
+                {% for v in item.other_versions %}
+                <div>
+                  <a href="/result/{{ v.batch_id }}">{{ v.batch_id }}</a> · 行 {{ v.row_no }} ·
+                  ¥{{ (v.amount_cents / 100) | round(2) }} / {{ v.qty }} 件
+                  {% if v.changed_fields %}<span class="muted">（{{ v.changed_fields | join(', ') }}）</span>{% endif %}
+                </div>
+                {% else %}—{% endfor %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="muted">本次撤回没有被后续批次修订过的订单：被撤下的订单都只属于该批。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          规则：同一 order_id 在更晚入库的 active 批次里出现 → 被撤回批次自己的那行仍撤下（避免重复累计），
+          后来批次的行原样保留并在此逐项标出；后来版本不再计入本批快照。
+        </p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>逐行撤回快照（前 200 行）</h2>
+        <div class="panel-actions"><span class="tag">{{ retraction.items_total }} 行 · 原样保留</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th class="num">原行号</th><th>order_id</th><th>site</th><th>category</th><th>order_date</th><th class="num">amount</th><th class="num">qty</th><th>处置</th></tr></thead>
+          <tbody>
+          {% for r in items[:200] %}
+            <tr>
+              <td class="num">{{ r.row_no }}</td>
+              <td>{{ r.order_id }}</td>
+              <td>{{ r.site }}</td>
+              <td>{{ r.category }}</td>
+              <td>{{ r.order_date }}</td>
+              <td class="num">¥{{ (r.amount_cents / 100) | round(2) }}</td>
+              <td class="num">{{ r.qty }}</td>
+              <td>{% if r.action == 'kept_later_version' %}<span class="tag warn">保留后来版本</span>{% else %}<span class="tag err">已撤下</span>{% endif %}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="muted">没有快照行。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel pane-sticky">
+    <div class="panel-head">
+      <h2>当前站点汇总（撤回后）</h2>
+      <div class="panel-actions">
+        <span class="tag {% if summary_check.ok %}ok{% else %}err{% endif %}">{% if summary_check.ok %}自证一致{% else %}不一致{% endif %}</span>
+      </div>
+    </div>
+    <div class="table-wrap auto">
+      <table class="dense">
+        <thead><tr><th>站点</th><th class="num">行数</th><th class="num">金额</th><th class="num">件数</th></tr></thead>
+        <tbody>
+          {% for s in current_summary.sites %}
+          <tr>
+            <td>{{ s.site }}</td>
+            <td class="num">{{ s.row_count }}</td>
+            <td class="num">¥{{ s.amount }}</td>
+            <td class="num">{{ s.qty }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="muted">当前没有明细行。</td></tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <th>合计</th>
+            <th class="num">{{ current_summary.fact_rows }}</th>
+            <th class="num">¥{{ (current_summary.total_amount_cents / 100) | round(2) }}</th>
+            <th class="num">{{ current_summary.total_qty }}</th>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <div class="panel-body">
+      {% if retraction.summary_before and retraction.summary_after %}
+      <p class="small muted" style="margin-top:0">
+        撤回前 {{ retraction.summary_before.fact_rows }} 行 / ¥{{ (retraction.summary_before.total_amount_cents / 100) | round(2) }}；
+        撤回后 {{ retraction.summary_after.fact_rows }} 行 / ¥{{ (retraction.summary_after.total_amount_cents / 100) | round(2) }}。
+      </p>
+      {% endif %}
+      <details class="help">
+        <summary>撤回口径</summary>
+        <ul class="list small" style="margin:6px 0 0">
+          <li>明细与站点汇总在同一事务块内切换，任一时刻两者一致。</li>
+          <li>被撤下的行不做物理删除：batches 行改为 retracted，逐行快照进 batch_retraction_items。</li>
+          <li>进度随每块提交持久化；中断后重试同一撤回从剩余行继续。</li>
+          <li>已完成的撤回重复发起只返回既有记录，不重复扣减。</li>
+          <li>撤回后相同 sha256 可重新上传（不再命中 duplicate_file）。</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+</div>
+{% endif %}
+
+{% include "_retract_dialog.html" %}
+{% endblock %}

@@ -2,7 +2,7 @@
 {% set latest = batches[0] if batches else none %}
 {% block title %}历史与复核 · {{ app_name }}{% endblock %}
 {% block crumb %}历史与复核{% endblock %}
-{% block meta %}<span class="dot {% if batches %}ok{% else %}warn{% endif %}"></span>批次 {{ stats.batches }} · 上传记录 {{ attempts|length }} 条 · 回滚 {{ stats.rejected_attempts }} 次{% endblock %}
+{% block meta %}<span class="dot {% if batches %}ok{% else %}warn{% endif %}"></span>批次 {{ stats.batches }} · 已撤回 {{ stats.retracted_batches }} · 上传记录 {{ attempts|length }} 条 · 回滚 {{ stats.rejected_attempts }} 次{% endblock %}
 {% block actions %}
 <a class="btn secondary small" href="/api/samples/normal_500.csv">下载样例 CSV</a>
 <a class="btn small" href="/workbench">去上传校验</a>
@@ -13,7 +13,7 @@
 <div class="page-head">
   <div>
     <h1 class="page-title">历史与复核</h1>
-    <p class="page-sub">每行是一个已入库批次或一次上传记录：同 sha256 重传不写库，回滚可见且明细行数不变，聚合用三条独立口径互相核对。</p>
+    <p class="page-sub">每行是一个已入库批次或一次上传记录：同 sha256 重传不写库，回滚可见且明细行数不变，聚合用三条独立口径互相核对。传错的文件可撤回，明细与汇总一次性切换。</p>
   </div>
   <div class="page-head-actions">
     <a class="btn secondary small" href="/review">刷新</a>
@@ -22,26 +22,94 @@
 
 <div class="kpi-strip">
   <div class="kpi">
-    <div class="k-label">已入库批次</div>
+    <div class="k-label">计入明细的批次</div>
     <div class="k-value">{{ stats.batches }}</div>
-    <div class="k-note">batches 表</div>
+    <div class="k-note">batches 表 · status=active</div>
   </div>
   <div class="kpi ok">
     <div class="k-label">库内明细行数</div>
     <div class="k-value">{{ stats.fact_rows }}</div>
     <div class="k-note">fact_orders · {{ stats.sites }} 个站点</div>
   </div>
+  <div class="kpi {% if stats.retracted_batches %}warn{% endif %}">
+    <div class="k-label">已撤回批次</div>
+    <div class="k-value">{{ stats.retracted_batches }}</div>
+    <div class="k-note">原批次与撤回依据长期保留</div>
+  </div>
   <div class="kpi {% if stats.rejected_attempts %}err{% endif %}">
     <div class="k-label">被拒绝/回滚的上传次数</div>
     <div class="k-value">{{ stats.rejected_attempts }}</div>
     <div class="k-note">rejected + encoding_failed</div>
   </div>
-  <div class="kpi">
-    <div class="k-label">本页上传记录</div>
-    <div class="k-value">{{ attempts|length }}</div>
-    <div class="k-note">含 committed / duplicate / 回滚</div>
-  </div>
 </div>
+
+<div class="split result">
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>当前站点汇总</h2>
+        <div class="panel-actions">
+          <span class="tag {% if summary_check.ok %}ok{% else %}err{% endif %}">
+            {% if summary_check.ok %}汇总与明细一致{% else %}汇总与明细不一致{% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>站点</th><th class="num">行数</th><th class="num">金额合计</th><th class="num">件数合计</th></tr></thead>
+          <tbody>
+          {% for s in site_totals.sites %}
+            <tr>
+              <td>{{ s.site }}</td>
+              <td class="num">{{ s.row_count }}</td>
+              <td class="num">¥{{ s.amount }}</td>
+              <td class="num">{{ s.qty }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">当前没有明细行。</td></tr>
+          {% endfor %}
+          </tbody>
+          <tfoot>
+            <tr>
+              <th>合计</th>
+              <th class="num">{{ site_totals.fact_rows }}</th>
+              <th class="num">¥{{ (site_totals.total_amount_cents / 100) | round(2) }}</th>
+              <th class="num">{{ site_totals.total_qty }}</th>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">站点汇总由导入与撤回在同一事务内维护，并与明细逐项复算核对；撤回后汇总立即扣减。</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>撤回记录</h2>
+        <div class="panel-actions"><span class="tag">{{ retractions|length }} 条</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>撤回记录</th><th>批次</th><th>原因</th><th class="num">撤下行数</th><th class="num">冲突</th><th>状态</th><th>时间</th></tr></thead>
+          <tbody>
+          {% for r in retractions %}
+            <tr>
+              <td><a href="/retraction/{{ r.batch_id }}">{{ r.retraction_id }}</a></td>
+              <td><a href="/result/{{ r.batch_id }}">{{ r.batch_id }}</a></td>
+              <td class="cell-ellipsis small">{{ r.reason or '—' }}</td>
+              <td class="num">{{ r.planned_rows }}</td>
+              <td class="num">{{ r.items_conflict }}</td>
+              <td>{% if r.status == 'completed' %}<span class="tag err">已完成</span>{% else %}<span class="tag warn">进度 {{ r.removed_rows }}/{{ r.planned_rows }}</span>{% endif %}</td>
+              <td class="small muted nowrap">{{ r.completed_at or r.created_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="muted">还没有撤回记录。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
 
 <div class="split result">
   <div>
@@ -52,6 +120,8 @@
           <option value="">全部批次</option>
           <option value="forced">仅 forced 重灌</option>
           <option value="superseded">仅已被替代</option>
+          <option value="retracted">仅已撤回</option>
+          <option value="active">仅计入明细</option>
         </select>
         <select id="review-encoding" aria-label="按编码筛选">
           <option value="">全部编码</option>
@@ -66,7 +136,7 @@
       <div class="table-wrap roomy">
         <table class="dense" id="batches-table">
           <thead>
-            <tr><th>批号</th><th>文件</th><th>编码</th><th class="num">行数</th><th class="num">金额合计</th><th>时间</th><th>重复导入验证</th></tr>
+            <tr><th>批号</th><th>文件</th><th>编码</th><th class="num">行数</th><th class="num">金额合计</th><th>时间</th><th>操作</th></tr>
           </thead>
           <tbody>
           {% for b in batches %}
@@ -77,18 +147,30 @@
                 data-sha="{{ b.sha256[:16] }}…"
                 data-forced="{{ '1' if b.forced else '0' }}"
                 data-superseded="{{ '1' if b.superseded_by else '0' }}"
+                data-retracted="{{ '1' if b.status == 'retracted' else '0' }}"
+                data-active="{{ '1' if b.status == 'active' else '0' }}"
                 data-search="{{ b.batch_id }} {{ b.filename }} {{ b.sha256 }} {{ b.encoding }}">
               <td class="nowrap"><a href="/result/{{ b.batch_id }}">{{ b.batch_id }}</a>
                 {% if b.forced %}<span class="tag warn">forced</span>{% endif %}
-                {% if b.superseded_by %}<span class="tag">已替代</span>{% endif %}</td>
+                {% if b.superseded_by %}<span class="tag">已替代</span>{% endif %}
+                {% if b.status == 'retracted' %}<span class="tag err">已撤回</span>
+                {% elif b.status == 'retracting' %}<span class="tag warn">撤回中</span>{% endif %}</td>
               <td class="cell-ellipsis">{{ b.filename }}</td>
               <td><span class="tag">{{ b.encoding }}</span>{% if b.bom %} BOM{% endif %}</td>
               <td class="num">{{ b.row_count }}</td>
               <td class="num">¥{{ b.total_amount }}</td>
               <td class="small muted nowrap">{{ b.created_at }}</td>
-              <td>
+              <td class="nowrap">
                 <button type="button" class="secondary small"
                         data-replay-sha="{{ b.sha256 }}" data-batch="{{ b.batch_id }}">验证重复导入</button>
+                {% if b.status == 'retracted' %}
+                <a class="btn secondary small" href="/retraction/{{ b.batch_id }}">撤回依据</a>
+                {% elif b.status in ('active', 'retracting') %}
+                <button type="button" class="danger small" data-retract-batch="{{ b.batch_id }}"
+                        data-retract-label="{{ b.batch_id }} / {{ b.filename }} / {{ b.row_count }} 行">
+                  {% if b.status == 'retracting' %}继续撤回{% else %}撤回{% endif %}
+                </button>
+                {% endif %}
               </td>
             </tr>
           {% else %}
@@ -98,7 +180,7 @@
         </table>
       </div>
       <div class="panel-body tight">
-        <p class="small muted" style="margin:0">点一行可在右侧看回执详情；「验证重复导入」只读判定，不写库。</p>
+        <p class="small muted" style="margin:0">点一行可在右侧看回执详情；「验证重复导入」只读判定，不写库；「撤回」会先确认再一次性切换明细与汇总。</p>
       </div>
     </section>
 
@@ -121,6 +203,8 @@
                 {% elif a.status == 'rolled_back' %}<span class="tag err">事务回滚</span>
                 {% elif a.status == 'rejected' %}<span class="tag err">校验拒绝</span>
                 {% elif a.status == 'encoding_failed' %}<span class="tag err">编码失败</span>
+                {% elif a.status == 'retracting' %}<span class="tag warn">撤回中</span>
+                {% elif a.status == 'retracted' %}<span class="tag err">已撤回</span>
                 {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
               </td>
               <td class="small">{{ a.encoding or '-' }}</td>
@@ -174,6 +258,8 @@
           <li><b>回滚可见</b>：任一行非法 → KPI「被拒绝/回滚的上传次数」+1，明细行数不变，可点开看逐行错误。</li>
           <li><b>重复文件</b>：sha256 相同 → duplicate_file，不写库；确需重灌用 force_new_batch，旧批次标 superseded_by。</li>
           <li><b>聚合自证</b>：结果页聚合用三条独立口径（分组 cents / 明细线性 / Decimal）互相核对。</li>
+          <li><b>批次撤回</b>：传错文件可撤回一个已入账批次；独有订单移出明细，被后续批次修订过的订单保留后来版本并在冲突清单逐项标出；明细与汇总一次性切换，原批次与撤回依据长期保留。</li>
+          <li><b>中断恢复</b>：撤回进度随块持久化，重试同一撤回从剩余行继续，不重复扣减；已撤销的 sha256 可重新上传。</li>
         </ul>
       </details>
     </div>
@@ -183,4 +269,5 @@
     </div>
   </section>
 </div>
+{% include "_retract_dialog.html" %}
 {% endblock %}

@@ -40,6 +40,11 @@ def _aggregate_totals(aggregates: dict) -> tuple[int, int]:
     return int(aggregates["total_amount_cents"]), int(aggregates["total_qty"])
 
 
+def _next_seq(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COALESCE(MAX(seq), 0) AS m FROM batches").fetchone()
+    return int(row["m"]) + 1
+
+
 def import_batch(
     conn: sqlite3.Connection,
     *,
@@ -55,6 +60,7 @@ def import_batch(
     batch_id: str | None = None,
 ) -> dict:
     """返回导入结论；不抛业务异常（故障也以 rolled_back 结果返回，便于页面展示）。"""
+    # 已撤回的批次不计入明细，也不会命中重复文件判定（同文件可以重新入库）。
     existing = store.find_batch_by_sha(conn, sha256)
     rows_before = store.count_rows(conn)
 
@@ -96,10 +102,12 @@ def import_batch(
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT INTO batches(batch_id, filename, sha256, encoding, bom, row_count,"
-            " total_amount_cents, total_qty, forced, superseded_by, created_at, note)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " total_amount_cents, total_qty, forced, superseded_by, seq, status,"
+            " retracted_at, retraction_id, created_at, note)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (batch_id, filename, sha256, encoding, 1 if bom else 0, len(rows),
-             total_cents, total_qty, 1 if existing else 0, None, store.now_iso(), note),
+             total_cents, total_qty, 1 if existing else 0, None, _next_seq(conn),
+             "active", None, None, store.now_iso(), note),
         )
         for row in rows:
             conn.execute(
@@ -120,10 +128,22 @@ def import_batch(
                 (batch_id, group["site"], int(group["amount_cents"]), int(group["qty"]),
                  int(group["row_count"])),
             )
+            # 当前站点汇总与明细在同一事务内累加，撤回时也在同一事务内扣减。
+            conn.execute(
+                "INSERT INTO site_totals(site, amount_cents, qty, row_count)"
+                " VALUES(?,?,?,?)"
+                " ON CONFLICT(site) DO UPDATE SET"
+                " amount_cents = amount_cents + excluded.amount_cents,"
+                " qty = qty + excluded.qty,"
+                " row_count = row_count + excluded.row_count",
+                (group["site"], int(group["amount_cents"]), int(group["qty"]),
+                 int(group["row_count"])),
+            )
 
         if existing:
             conn.execute(
-                "UPDATE batches SET superseded_by = ? WHERE sha256 = ? AND superseded_by IS NULL",
+                "UPDATE batches SET superseded_by = ?"
+                " WHERE sha256 = ? AND status = 'active' AND superseded_by IS NULL",
                 (batch_id, sha256),
             )
 

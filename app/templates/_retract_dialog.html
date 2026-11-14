@@ -1,0 +1,26 @@
+<dialog id="retract-dialog" class="retract-dialog">
+  <form method="dialog" id="retract-form">
+    <h3>撤回已入账批次</h3>
+    <p class="muted" id="retract-target">—</p>
+    <p class="muted">
+      撤回会一次性从<b>当前明细</b>与<b>站点汇总</b>中撤下该批独有的订单；
+      被更晚批次修订过的订单保留后来版本，并逐项列入冲突清单。
+      原批次、逐行快照与撤回依据长期保留，可事后复核。中断后可从此进度恢复，重复撤回不会重复扣减。
+    </p>
+    <div class="field">
+      <label for="retract-reason">撤回原因（写入撤回依据，建议填写）</label>
+      <input type="text" id="retract-reason" name="reason" maxlength="200"
+             placeholder="例如：值班传错文件，误传 normal_500.csv">
+    </div>
+    <div class="field">
+      <label for="retract-operator">操作人</label>
+      <input type="text" id="retract-operator" name="operator" maxlength="60"
+             placeholder="值班同学工号/姓名">
+    </div>
+    <div class="alert alert-error" id="retract-dialog-error" hidden></div>
+    <div class="actions">
+      <button type="button" class="secondary" id="retract-cancel">取消</button>
+      <button type="button" class="danger" id="retract-confirm">确认撤回</button>
+    </div>
+  </form>
+</dialog>
